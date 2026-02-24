@@ -1,0 +1,181 @@
+
+/**
+ * @fileOverview Firestore Security Rules for Freelancer Hub.
+ *
+ * Core Philosophy:
+ * This ruleset enforces a strict user-ownership model for user profiles, clients, and projects.
+ * Users can only create, read, update, and delete their own data.
+ * Referrals have separate read and write rules based on the client and freelancer involved.
+ * Proposals have rules based on the submitting freelancer and the client who owns the project.
+ * Competitions can be created by any authenticated user (client) and read by anyone.
+ *
+ * Data Structure:
+ * - /users/{userId}: Stores user profiles, accessible only by the user.
+ * - /users/{userId}/clients/{clientId}: Stores clients owned by a specific freelancer.
+ * - /users/{userId}/clients/{clientId}/projects/{projectId}: Stores projects owned by a freelancer for a client.
+ * - /users/{userId}/portfolioProjects/{projectId}: Stores a freelancer's portfolio projects.
+ * - /referrals/{referralId}: Stores referral data.
+ * - /proposals/{proposalId}: Stores proposal data.
+ * - /competitions/{competitionId}: Stores competition data.
+ *
+ * Key Security Decisions:
+ * - User listing is disabled for privacy.
+ * - Clients and projects are nested under user documents to enforce ownership.
+ * - Referral access is based on the referred freelancer and the referring client.
+ * - Proposal access is based on the submitting freelancer and the project's client.
+ * - Competition creation is restricted to authenticated users.
+ *
+ * Denormalization for Authorization:
+ * The Client and Project documents contain the freelancerUid, removing the need for get() calls
+ * to the user document when checking permissions. The referral, proposal, and competition documents contain necessary UIDs
+ * for similar reasons.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * @description Secure user profiles. Only the user can read and write their own profile.
+     * @path /users/{uid}
+     */
+    match /users/{userId} {
+      function isOwner(userId) {
+        return request.auth.uid == userId;
+      }
+
+      function isExistingOwner(userId) {
+        return isOwner(userId) && resource != null;
+      }
+
+      allow get: if isOwner(userId);
+      allow list: if false; // User listing is not allowed
+
+      allow create: if isOwner(userId) && request.resource.data.uid == userId;
+      allow update: if isExistingOwner(userId) && request.resource.data.uid == resource.data.uid;
+      allow delete: if isExistingOwner(userId);
+    }
+
+    /**
+     * @description Secure clients. Only the owning freelancer can manage their clients.
+     * @path /users/{freelancerUid}/clients/{clientId}
+     */
+    match /users/{freelancerUid}/clients/{clientId} {
+      function isOwner(freelancerUid) {
+        return request.auth.uid == freelancerUid;
+      }
+
+      function isExistingOwner(freelancerUid) {
+        return isOwner(freelancerUid) && resource != null;
+      }
+      allow get: if isOwner(freelancerUid);
+      allow list: if isOwner(freelancerUid);
+
+      allow create: if isOwner(freelancerUid) && request.resource.data.freelancerUid == freelancerUid;
+      allow update: if isExistingOwner(freelancerUid) && request.resource.data.freelancerUid == resource.data.freelancerUid;
+      allow delete: if isExistingOwner(freelancerUid);
+    }
+
+    /**
+     * @description Secure freelancer portfolio projects. Only the owning freelancer can manage them.
+     * @path /users/{freelancerUid}/portfolioProjects/{projectId}
+     */
+    match /users/{freelancerUid}/portfolioProjects/{projectId} {
+      function isOwner(freelancerUid) {
+        return request.auth.uid == freelancerUid;
+      }
+      
+      // Allow the owner to list and get their own projects
+      allow list, get: if isOwner(freelancerUid);
+      
+      // Allow the owner to create, update, and delete if the data is valid
+      allow create: if isOwner(freelancerUid) && request.resource.data.freelancerUid == freelancerUid;
+      allow update, delete: if isOwner(freelancerUid) && resource.data.freelancerUid == freelancerUid;
+    }
+
+
+    /**
+     * @description Secure projects. Only the owning freelancer can manage their clients' projects.
+     * @path /users/{freelancerUid}/clients/{clientId}/projects/{projectId}
+     */
+    match /users/{freelancerUid}/clients/{clientId}/projects/{projectId} {
+      function isOwner(freelancerUid) {
+        return request.auth.uid == freelancerUid;
+      }
+
+      function isExistingOwner(freelancerUid) {
+        return isOwner(freelancerUid) && resource != null;
+      }
+      allow get: if isOwner(freelancerUid);
+      allow list: if isOwner(freelancerUid);
+
+      allow create: if isOwner(freelancerUid) && request.resource.data.freelancerUid == freelancerUid;
+      allow update: if isExistingOwner(freelancerUid) && request.resource.data.freelancerUid == resource.data.freelancerUid;
+      allow delete: if isExistingOwner(freelancerUid);
+    }
+
+    /**
+     * @description Secure referrals.  Only the referring client or the referred freelancer can read the referral.  The referring client can create a referral.
+     * @path /referrals/{referralId}
+     */
+    match /referrals/{referralId} {
+      function isClientOrFreelancer(clientId, referredFreelancerUid) {
+        return request.auth.uid == clientId || request.auth.uid == referredFreelancerUid;
+      }
+
+      allow get: if isClientOrFreelancer(resource.data.clientId, resource.data.referredFreelancerUid);
+      allow list: if false; // Listing referrals is not allowed to prevent data leakage
+
+      allow create: if request.auth.uid == request.resource.data.clientId;
+      allow update: if false; // Only server-side updates allowed
+      allow delete: if false; // Only server-side deletes allowed
+    }
+    
+    /**
+     * @description Secure proposals. Freelancers create, clients read/update status.
+     * @path /proposals/{proposalId}
+     */
+    match /proposals/{proposalId} {
+      function isSubmittingFreelancer() {
+        return request.auth.uid == request.resource.data.freelancerUid;
+      }
+      
+      function isProjectClient() {
+        // Check both existing data and incoming data for the client UID.
+        return request.auth.uid == resource.data.clientUid || request.auth.uid == request.resource.data.clientUid;
+      }
+      
+      function isOwnerOrClient() {
+        return request.auth.uid == resource.data.freelancerUid || isProjectClient();
+      }
+      
+      function isClientUpdatingStatus() {
+        return isProjectClient() 
+          && request.resource.data.status != resource.data.status
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      }
+
+      allow create: if isSubmittingFreelancer();
+      allow get: if isOwnerOrClient();
+      allow list: if request.auth.uid != null;
+      
+      allow update: if isClientUpdatingStatus();
+      allow delete: if false;
+    }
+
+    /**
+     * @description Secure competitions. Authenticated users (clients) can create. Anyone can read.
+     * @path /competitions/{competitionId}
+     */
+    match /competitions/{competitionId} {
+      function isClientOwner() {
+        return request.auth.uid == request.resource.data.clientUid;
+      }
+
+      allow read: if true;
+
+      allow create: if request.auth != null && isClientOwner();
+      allow update: if request.auth.uid == resource.data.clientUid;
+      allow delete: if request.auth.uid == resource.data.clientUid;
+    }
+  }
+}
