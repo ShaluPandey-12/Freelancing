@@ -1,7 +1,7 @@
 # 🚀 Freelancer Platform
 
 <h3 align="center">
-Modern Freelancing Platform for Clients & Developers
+Modern Updated Freelancing Platform for Clients & Developers
 </h3>
 
 <div align="center">
